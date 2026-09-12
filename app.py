@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 from typing import List
+from extra_streamlit_components import CookieManager
 
 # ==================== 页面配置 ====================
 st.set_page_config(
@@ -10,11 +11,20 @@ st.set_page_config(
 )
 
 st.title("📤 Telegram 发送工具（Streamlit Cloud 版）")
-st.caption("⚠️ 本版本服务端不保存任何信息（无数据库、无文件、无历史记录），刷新页面后配置需重新填写。")
+st.caption("⚠️ 服务端不保存任何信息。配置仅保存在您自己的浏览器本地。")
 
-# ==================== 默认值（可从 Streamlit Secrets 读取） ====================
+# ==================== Cookie 管理（浏览器本地存储） ====================
+cookie_manager = CookieManager(key="telegram_cookie_manager")
+
+# 从浏览器 Cookie 读取上次保存的配置
+saved_api_base = cookie_manager.get("api_base")
+saved_bot_token = cookie_manager.get("bot_token")
+saved_chat_id = cookie_manager.get("chat_id")
+
+# ==================== 默认值 ====================
 DEFAULT_API_BASE = "https://api.urlnet.top/telegram"
 
+# 优先使用浏览器本地保存的值，其次使用 Secrets（可选）
 try:
     DEFAULT_API_BASE = st.secrets.get("API_BASE", DEFAULT_API_BASE)
     DEFAULT_BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
@@ -22,6 +32,11 @@ try:
 except Exception:
     DEFAULT_BOT_TOKEN = ""
     DEFAULT_CHAT_ID = ""
+
+# 最终默认值：浏览器本地 > Secrets > 硬编码
+final_api_base = saved_api_base if saved_api_base else DEFAULT_API_BASE
+final_bot_token = saved_bot_token if saved_bot_token else DEFAULT_BOT_TOKEN
+final_chat_id = saved_chat_id if saved_chat_id else DEFAULT_CHAT_ID
 
 # ==================== Telegram API 函数 ====================
 def get_api_url(token: str, method: str, api_base: str) -> str:
@@ -36,7 +51,7 @@ def test_bot(token: str, api_base: str) -> dict:
         return {"ok": False, "description": str(e)}
 
 def split_text(text: str, max_length: int = 4096) -> List[str]:
-    """把超长文字安全拆分成多段（不超过 Telegram 限制）"""
+    """把超长文字安全拆分成多段"""
     if len(text) <= max_length:
         return [text]
 
@@ -45,7 +60,6 @@ def split_text(text: str, max_length: int = 4096) -> List[str]:
         if len(text) <= max_length:
             chunks.append(text)
             break
-        # 尽量在换行或空格处切断
         cut_pos = text.rfind('\n', 0, max_length)
         if cut_pos == -1 or cut_pos < max_length // 2:
             cut_pos = text.rfind(' ', 0, max_length)
@@ -57,10 +71,7 @@ def split_text(text: str, max_length: int = 4096) -> List[str]:
     return chunks
 
 def send_text(token: str, chat_id: str, text: str, api_base: str, parse_mode: str = None) -> dict:
-    """
-    发送文字（自动拆分超长消息）
-    parse_mode: None = 纯文本（推荐），"HTML" 或 "Markdown"
-    """
+    """发送文字（自动拆分超长消息）"""
     chunks = split_text(text, max_length=4096)
     results = []
 
@@ -98,7 +109,6 @@ def send_text(token: str, chat_id: str, text: str, api_base: str, parse_mode: st
 def send_document(token: str, chat_id: str, file_bytes: bytes, filename: str, caption: str, api_base: str) -> dict:
     url = get_api_url(token, "sendDocument", api_base)
 
-    # 文件说明最长 1024 字符
     if len(caption) > 1024:
         caption = caption[:1021] + "..."
 
@@ -116,26 +126,46 @@ def send_document(token: str, chat_id: str, file_bytes: bytes, filename: str, ca
 
 # ==================== 侧边栏配置 ====================
 with st.sidebar:
-    st.header("⚙️ 配置（仅当前会话有效）")
+    st.header("⚙️ 配置")
 
     api_base = st.text_input(
         "API 基础地址",
-        value=DEFAULT_API_BASE,
+        value=final_api_base,
         help="例如：https://api.urlnet.top/telegram 或 https://api.telegram.org"
     )
 
     bot_token = st.text_input(
         "Bot Token",
-        value=DEFAULT_BOT_TOKEN,
+        value=final_bot_token,
         type="password",
         help="格式：123456:ABC-DEF..."
     )
 
     chat_id = st.text_input(
         "群组 / 用户 ID",
-        value=DEFAULT_CHAT_ID,
+        value=final_chat_id,
         help="群组通常以 -100 开头，例如 -1003504966336"
     )
+
+    # 保存到浏览器本地
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 保存到本地", use_container_width=True, type="primary"):
+            cookie_manager.set("api_base", api_base, expires_at=None)
+            cookie_manager.set("bot_token", bot_token, expires_at=None)
+            cookie_manager.set("chat_id", chat_id, expires_at=None)
+            st.success("✅ 已保存到您的浏览器本地！")
+            st.rerun()
+
+    with col2:
+        if st.button("🗑️ 清除本地", use_container_width=True):
+            cookie_manager.delete("api_base")
+            cookie_manager.delete("bot_token")
+            cookie_manager.delete("chat_id")
+            st.success("已清除本地保存的配置")
+            st.rerun()
+
+    st.markdown("---")
 
     if st.button("🔍 测试 Bot 连接", use_container_width=True):
         if not bot_token:
@@ -150,7 +180,7 @@ with st.sidebar:
                     st.error(f"❌ 失败：{result.get('description', result)}")
 
     st.markdown("---")
-    st.info("本工具部署在 Streamlit Cloud，**服务端不会保存** Token、群组ID、消息或文件。\n\n超长文字会自动拆分（每条 ≤ 4096 字符）。")
+    st.info("配置仅保存在**您自己的浏览器**中，服务器不会存储任何 Token 或群组信息。")
 
 # ==================== 主界面 ====================
 tab1, tab2 = st.tabs(["📝 发送文字", "📁 发送文件"])
@@ -226,4 +256,4 @@ with tab2:
                     st.error(f"❌ 发送失败：{result.get('description', result)}")
 
 st.markdown("---")
-st.caption("Telegram 文字消息限制 4096 字符，本工具已自动处理超长内容拆分。默认使用纯文本模式，避免解析错误。")
+st.caption("配置保存在浏览器本地 Cookie 中，服务器不保存任何敏感信息。超长文字自动拆分，默认纯文本模式。")
