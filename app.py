@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
+import json
 from typing import List
-from extra_streamlit_components import CookieManager
+import streamlit.components.v1 as components
 
 # ==================== 页面配置 ====================
 st.set_page_config(
@@ -13,30 +14,69 @@ st.set_page_config(
 st.title("📤 Telegram 发送工具（Streamlit Cloud 版）")
 st.caption("⚠️ 服务端不保存任何信息。配置仅保存在您自己的浏览器本地。")
 
-# ==================== Cookie 管理（浏览器本地存储） ====================
-cookie_manager = CookieManager(key="telegram_cookie_manager")
+# ==================== 浏览器本地存储（localStorage） ====================
+def get_local_storage():
+    """从浏览器 localStorage 读取配置"""
+    html = """
+    <script>
+    const data = localStorage.getItem('telegram_config');
+    if (data) {
+        window.parent.postMessage({type: 'local_storage', data: data}, '*');
+    } else {
+        window.parent.postMessage({type: 'local_storage', data: null}, '*');
+    }
+    </script>
+    """
+    result = components.html(html, height=0)
+    return result
 
-# 从浏览器 Cookie 读取上次保存的配置
-saved_api_base = cookie_manager.get("api_base")
-saved_bot_token = cookie_manager.get("bot_token")
-saved_chat_id = cookie_manager.get("chat_id")
+def save_to_local_storage(api_base: str, bot_token: str, chat_id: str):
+    """保存配置到浏览器 localStorage"""
+    config = {
+        "api_base": api_base,
+        "bot_token": bot_token,
+        "chat_id": chat_id
+    }
+    config_json = json.dumps(config, ensure_ascii=False)
+    # 转义特殊字符
+    config_json = config_json.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    
+    html = f"""
+    <script>
+    localStorage.setItem('telegram_config', `{config_json}`);
+    window.parent.postMessage({{type: 'saved', status: 'ok'}}, '*');
+    </script>
+    """
+    components.html(html, height=0)
 
-# ==================== 默认值 ====================
-DEFAULT_API_BASE = "https://api.urlnet.top/telegram"
+def clear_local_storage():
+    """清除浏览器 localStorage"""
+    html = """
+    <script>
+    localStorage.removeItem('telegram_config');
+    window.parent.postMessage({type: 'cleared', status: 'ok'}, '*');
+    </script>
+    """
+    components.html(html, height=0)
 
-# 优先使用浏览器本地保存的值，其次使用 Secrets（可选）
+# ==================== 读取本地配置 ====================
+# 使用 session_state 缓存，避免重复读取
+if "local_config" not in st.session_state:
+    st.session_state.local_config = {
+        "api_base": "https://api.urlnet.top/telegram",
+        "bot_token": "",
+        "chat_id": ""
+    }
+
+# 尝试从 Secrets 获取默认值（可选）
 try:
-    DEFAULT_API_BASE = st.secrets.get("API_BASE", DEFAULT_API_BASE)
-    DEFAULT_BOT_TOKEN = st.secrets.get("BOT_TOKEN", "")
-    DEFAULT_CHAT_ID = st.secrets.get("CHAT_ID", "")
+    default_api = st.secrets.get("API_BASE", "https://api.urlnet.top/telegram")
+    default_token = st.secrets.get("BOT_TOKEN", "")
+    default_chat = st.secrets.get("CHAT_ID", "")
 except Exception:
-    DEFAULT_BOT_TOKEN = ""
-    DEFAULT_CHAT_ID = ""
-
-# 最终默认值：浏览器本地 > Secrets > 硬编码
-final_api_base = saved_api_base if saved_api_base else DEFAULT_API_BASE
-final_bot_token = saved_bot_token if saved_bot_token else DEFAULT_BOT_TOKEN
-final_chat_id = saved_chat_id if saved_chat_id else DEFAULT_CHAT_ID
+    default_api = "https://api.urlnet.top/telegram"
+    default_token = ""
+    default_chat = ""
 
 # ==================== Telegram API 函数 ====================
 def get_api_url(token: str, method: str, api_base: str) -> str:
@@ -51,7 +91,6 @@ def test_bot(token: str, api_base: str) -> dict:
         return {"ok": False, "description": str(e)}
 
 def split_text(text: str, max_length: int = 4096) -> List[str]:
-    """把超长文字安全拆分成多段"""
     if len(text) <= max_length:
         return [text]
 
@@ -71,16 +110,12 @@ def split_text(text: str, max_length: int = 4096) -> List[str]:
     return chunks
 
 def send_text(token: str, chat_id: str, text: str, api_base: str, parse_mode: str = None) -> dict:
-    """发送文字（自动拆分超长消息）"""
     chunks = split_text(text, max_length=4096)
     results = []
 
     for i, chunk in enumerate(chunks, 1):
         url = get_api_url(token, "sendMessage", api_base)
-        payload = {
-            "chat_id": chat_id,
-            "text": chunk
-        }
+        payload = {"chat_id": chat_id, "text": chunk}
         if parse_mode:
             payload["parse_mode"] = parse_mode
 
@@ -113,10 +148,7 @@ def send_document(token: str, chat_id: str, file_bytes: bytes, filename: str, ca
         caption = caption[:1021] + "..."
 
     files = {"document": (filename, file_bytes)}
-    data = {
-        "chat_id": chat_id,
-        "caption": caption
-    }
+    data = {"chat_id": chat_id, "caption": caption}
 
     try:
         resp = requests.post(url, data=data, files=files, timeout=120)
@@ -128,41 +160,49 @@ def send_document(token: str, chat_id: str, file_bytes: bytes, filename: str, ca
 with st.sidebar:
     st.header("⚙️ 配置")
 
+    # 使用 session_state 的值作为初始值
     api_base = st.text_input(
         "API 基础地址",
-        value=final_api_base,
-        help="例如：https://api.urlnet.top/telegram 或 https://api.telegram.org"
+        value=st.session_state.local_config.get("api_base", default_api),
+        key="api_base_input"
     )
 
     bot_token = st.text_input(
         "Bot Token",
-        value=final_bot_token,
+        value=st.session_state.local_config.get("bot_token", default_token),
         type="password",
-        help="格式：123456:ABC-DEF..."
+        key="bot_token_input"
     )
 
     chat_id = st.text_input(
         "群组 / 用户 ID",
-        value=final_chat_id,
-        help="群组通常以 -100 开头，例如 -1003504966336"
+        value=st.session_state.local_config.get("chat_id", default_chat),
+        key="chat_id_input"
     )
 
-    # 保存到浏览器本地
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 保存到本地", use_container_width=True, type="primary"):
-            cookie_manager.set("api_base", api_base, expires_at=None)
-            cookie_manager.set("bot_token", bot_token, expires_at=None)
-            cookie_manager.set("chat_id", chat_id, expires_at=None)
+            # 更新 session_state
+            st.session_state.local_config = {
+                "api_base": api_base,
+                "bot_token": bot_token,
+                "chat_id": chat_id
+            }
+            # 写入浏览器 localStorage
+            save_to_local_storage(api_base, bot_token, chat_id)
             st.success("✅ 已保存到您的浏览器本地！")
-            st.rerun()
+            st.balloons()
 
     with col2:
         if st.button("🗑️ 清除本地", use_container_width=True):
-            cookie_manager.delete("api_base")
-            cookie_manager.delete("bot_token")
-            cookie_manager.delete("chat_id")
-            st.success("已清除本地保存的配置")
+            st.session_state.local_config = {
+                "api_base": default_api,
+                "bot_token": "",
+                "chat_id": ""
+            }
+            clear_local_storage()
+            st.success("已清除本地配置")
             st.rerun()
 
     st.markdown("---")
@@ -180,12 +220,11 @@ with st.sidebar:
                     st.error(f"❌ 失败：{result.get('description', result)}")
 
     st.markdown("---")
-    st.info("配置仅保存在**您自己的浏览器**中，服务器不会存储任何 Token 或群组信息。")
+    st.info("配置仅保存在**您自己的浏览器** localStorage 中，服务器不会存储任何敏感信息。")
 
 # ==================== 主界面 ====================
 tab1, tab2 = st.tabs(["📝 发送文字", "📁 发送文件"])
 
-# ---------- 发送文字 ----------
 with tab1:
     st.subheader("发送文字消息")
     text_content = st.text_area("消息内容", height=220, placeholder="支持超长文字，会自动拆分发送...")
@@ -226,7 +265,6 @@ with tab1:
                 else:
                     st.error(f"❌ 发送失败：{result.get('description', result)}")
 
-# ---------- 发送文件 ----------
 with tab2:
     st.subheader("上传并发送文件")
     uploaded_file = st.file_uploader("选择文件（支持任意类型）", type=None)
@@ -256,4 +294,4 @@ with tab2:
                     st.error(f"❌ 发送失败：{result.get('description', result)}")
 
 st.markdown("---")
-st.caption("配置保存在浏览器本地 Cookie 中，服务器不保存任何敏感信息。超长文字自动拆分，默认纯文本模式。")
+st.caption("配置保存在浏览器 localStorage，服务器不保存任何敏感信息。超长文字自动拆分，默认纯文本模式。")
